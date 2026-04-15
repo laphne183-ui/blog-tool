@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+
+build/
+dist/
+output/
+
+config.json
+input.csv
+
+*.log
+*.tmp
