@@ -416,6 +416,9 @@ class BlogRankApp(ctk.CTk):
         self.editor_info = None
         self.match_dialog = None
         self.template_path = ""
+        self.weekly_pending = False
+        self.weekly_company = ""
+        self.weekly_week = 1
         self.last_clicked_column = "#1"
         self.status_var = tk.StringVar(value="대기 중")
         self.summary_primary_var = tk.StringVar(value="총 0 | 진행 0/0 | 노출 0 | 미노출 0 | 오류 0")
@@ -476,7 +479,7 @@ class BlogRankApp(ctk.CTk):
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 14))
         body.grid_rowconfigure(0, weight=2)
-        body.grid_rowconfigure(3, weight=3)
+        body.grid_rowconfigure(4, weight=3)
         body.grid_columnconfigure(0, weight=1)
 
         list_frame = ctk.CTkFrame(body, corner_radius=14, fg_color="#EAEAEA")
@@ -748,8 +751,50 @@ class BlogRankApp(ctk.CTk):
         self.report_button.grid(row=0, column=4)
         # ───────────────────────────────────────────────────────────────────
 
+        # ── 주간 보고 행 ────────────────────────────────────────────────────
+        weekly_row = ctk.CTkFrame(body, fg_color="transparent")
+        weekly_row.grid(row=3, column=0, sticky="ew", pady=(2, 6))
+
+        ctk.CTkLabel(
+            weekly_row,
+            text="주간 보고",
+            font=(F, 13),
+            text_color="#374151",
+        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+
+        self.weekly_company_entry = ctk.CTkEntry(
+            weekly_row,
+            placeholder_text="업체명 입력",
+            width=170,
+            font=(F, 13),
+        )
+        self.weekly_company_entry.grid(row=0, column=1, padx=(0, 8))
+
+        self.weekly_week_menu = ctk.CTkOptionMenu(
+            weekly_row,
+            values=["1~5"],
+            width=90,
+            font=(F, 13),
+        )
+        self.weekly_week_menu.grid(row=0, column=2, padx=(0, 8))
+
+        self.weekly_button = ctk.CTkButton(
+            weekly_row,
+            text="주간 보고 생성",
+            width=120,
+            height=32,
+            fg_color="#D97706",
+            hover_color="#B45309",
+            text_color="white",
+            font=(F, 13),
+            state="disabled",
+            command=self._start_weekly_report,
+        )
+        self.weekly_button.grid(row=0, column=3)
+        # ───────────────────────────────────────────────────────────────────
+
         result_frame = ctk.CTkFrame(body, corner_radius=14, fg_color="#111318")
-        result_frame.grid(row=3, column=0, sticky="nsew")
+        result_frame.grid(row=4, column=0, sticky="nsew")
         result_frame.grid_columnconfigure(0, weight=1)
         result_frame.grid_rowconfigure(1, weight=1)
 
@@ -1172,12 +1217,12 @@ class BlogRankApp(ctk.CTk):
                 return
             company = company.strip()
 
-        import openpyxl
-        from excel_writer import read_schedule_keywords
+        from excel_writer import read_schedule_keywords, _load_workbook_safe
 
         try:
-            wb = openpyxl.load_workbook(self.template_path)
+            wb = _load_workbook_safe(self.template_path, read_only=True, data_only=False)
             keywords = read_schedule_keywords(wb)
+            wb.close()
         except Exception as exc:
             messagebox.showerror("읽기 오류", f"템플릿에서 키워드를 읽는 중 오류가 발생했습니다:\n{exc}", parent=self)
             return
@@ -1205,6 +1250,132 @@ class BlogRankApp(ctk.CTk):
         self._persist_rows()
         self._append_log(f"템플릿에서 키워드 {len(new_rows)}개를 불러왔습니다. (업체: {company})\n", "yellow")
 
+    def _start_weekly_report(self):
+        if not self.template_path or not os.path.exists(self.template_path):
+            messagebox.showwarning("템플릿 없음", "보고서 템플릿 파일을 먼저 선택해주세요.", parent=self)
+            return
+
+        company = self.weekly_company_entry.get().strip()
+        if not company:
+            messagebox.showwarning("업체명 필요", "업체명을 입력해주세요.", parent=self)
+            return
+
+        if not self.client_id_var.get().strip() or not self.client_secret_var.get().strip():
+            messagebox.showwarning("API 확인", "Client ID와 Client Secret을 입력해주세요.", parent=self)
+            return
+
+        week_str = self.weekly_week_menu.get()
+        try:
+            week = int(week_str.split("~", 1)[0].strip()) // 5 + 1
+        except ValueError:
+            week = 1
+
+        from excel_writer import read_schedule_by_week, _load_workbook_safe
+        try:
+            wb = _load_workbook_safe(self.template_path, read_only=True, data_only=False)
+            week_keywords = read_schedule_by_week(wb, week)
+            wb.close()
+        except Exception as exc:
+            messagebox.showerror("읽기 오류", f"스케줄에서 키워드를 읽는 중 오류:\n{exc}", parent=self)
+            return
+
+        if not week_keywords:
+            messagebox.showwarning("키워드 없음", f"{self._format_week_range(week)} 구간 키워드가 없습니다.\n스케줄 시트에 '순' / '키워드' 컬럼이 있는지 확인해주세요.", parent=self)
+            return
+
+        self.weekly_company = company
+        self.weekly_week = week
+        self.weekly_pending = True
+
+        new_rows = [{"업체명": company, "키워드": kw, "식별값": company} for kw, _ in week_keywords]
+        if self.rows:
+            if not messagebox.askyesno(
+                "기존 목록 대체",
+                f"현재 검색 목록 {len(self.rows)}개를 삭제하고\n"
+                f"{self._format_week_range(week)} 구간 키워드 {len(new_rows)}개로 교체 후 검색을 시작할까요?",
+                parent=self,
+            ):
+                self.weekly_pending = False
+                return
+
+        self.rows = new_rows
+        self._load_tree_rows()
+        self._persist_rows()
+        self._start_search()
+
+    def _generate_weekly_txt(self):
+        company = self.weekly_company
+        week = self.weekly_week
+        week_label = self._format_week_range(week)
+
+        lines = [f"+ ■ {company} 주간 진행현황 보고드립니다.", ""]
+
+        exposed_lines = []
+        weekly_capture_rows = []
+        total = 0
+        for r in self.results:
+            if r.get("error"):
+                continue
+            total += 1
+            screen = str(r.get("screen", "")).strip()
+            if screen.isdigit() and int(screen) <= 30:
+                rank = int(screen)
+                exposed_lines.append(f"- 키워드 '{r['keyword']}' 1pg ({rank}) 노출")
+                weekly_capture_rows.append(r)
+
+        lines.append("□ 상위노출 여부")
+        lines.append(f"금주발행건 {total}개 중 {len(exposed_lines)}개 상위노출 중")
+        lines.extend(exposed_lines)
+        lines += [
+            "",
+            "□ 이웃 관리 현황",
+            "- 금주 (서로)이웃 추가수: [직접입력]",
+            "",
+            "□ 좋아요 & 댓글 관리 현황",
+            "- 좋아요 25개 완료",
+            "- 댓글 25개 완료",
+            "",
+            "□ 주간 유입 경로 키워드",
+            "- [직접입력]",
+            "- [직접입력]",
+            "- [직접입력]",
+        ]
+
+        safe_company = app_main.safe_filename(company)
+        company_dir = os.path.join(OUTPUT_DIR, "captures", safe_company)
+        weekly_dir = os.path.join(OUTPUT_DIR, "주간 보고", safe_company)
+        os.makedirs(weekly_dir, exist_ok=True)
+
+        for entry in os.scandir(weekly_dir):
+            if entry.is_file():
+                os.remove(entry.path)
+
+        from excel_writer import find_capture_file
+
+        copied_count = 0
+        for row in weekly_capture_rows:
+            src_path = find_capture_file(row["keyword"], company_dir)
+            if not src_path or not os.path.exists(src_path):
+                continue
+            dst_path = os.path.join(weekly_dir, os.path.basename(src_path))
+            shutil.copy2(src_path, dst_path)
+            copied_count += 1
+
+        filename = f"{safe_company}_{week_label}_주간보고.txt"
+        txt_path = os.path.join(weekly_dir, filename)
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        self._append_log(f"\n주간 보고 생성 완료: {filename}\n", "green")
+        self._append_log(f"  주간 보고 이미지 {copied_count}개 저장\n", "white")
+        messagebox.showinfo(
+            "주간 보고 생성 완료",
+            f"저장 위치:\n{txt_path}\n\n"
+            f"주간 보고 이미지: {copied_count}개\n"
+            f"이웃 추가수와 유입 경로 키워드는 직접 수정해주세요.",
+            parent=self,
+        )
+
     def _select_template(self):
         path = filedialog.askopenfilename(
             title="보고서 템플릿 파일 선택",
@@ -1218,6 +1389,34 @@ class BlogRankApp(ctk.CTk):
         self.template_label.configure(text=filename, text_color="#111827")
         self.report_button.configure(state="normal")
         self.load_kw_button.configure(state="normal")
+        self.weekly_button.configure(state="normal")
+
+        # 파일명에서 업체명 자동 추출 → 주간 보고 업체명 입력란에 자동 채우기
+        basename = os.path.splitext(filename)[0]
+        if "_스케줄" in basename:
+            company_hint = basename.split("_스케줄")[0]
+        elif "_" in basename:
+            company_hint = basename.split("_")[0]
+        else:
+            company_hint = basename
+        self.weekly_company_entry.delete(0, "end")
+        self.weekly_company_entry.insert(0, company_hint)
+
+        try:
+            from excel_writer import get_schedule_max_week, _load_workbook_safe
+            wb = _load_workbook_safe(path, read_only=True, data_only=False)
+            max_week = get_schedule_max_week(wb)
+            wb.close()
+        except Exception:
+            max_week = 4
+        week_options = [self._format_week_range(w) for w in range(1, max_week + 1)]
+        self.weekly_week_menu.configure(values=week_options)
+        self.weekly_week_menu.set(week_options[0])
+
+    def _format_week_range(self, week):
+        start = (int(week) - 1) * 5 + 1
+        end = int(week) * 5
+        return f"{start}~{end}"
 
     def _generate_report(self, auto=False):
         if not self.template_path or not os.path.exists(self.template_path):
@@ -1521,8 +1720,12 @@ class BlogRankApp(ctk.CTk):
         self._append_log("모든 검색 완료! 결과 폴더를 확인하세요.\n", "summary_done")
         self._update_summary_panel()
 
+        # 주간 보고 모드이면 .txt 생성
+        if self.weekly_pending:
+            self.weekly_pending = False
+            self.after(300, self._generate_weekly_txt)
         # 보고서 템플릿이 선택되어 있으면 자동 생성
-        if self.template_path:
+        elif self.template_path:
             self._append_log("\n보고서 템플릿이 선택되어 있어 자동으로 보고서를 생성합니다...\n", "yellow")
             self.after(500, lambda: self._generate_report(auto=True))
 

@@ -7,7 +7,7 @@ echo ========================================
 echo.
 
 echo [1/2] Running PyInstaller...
-python -m PyInstaller blog_tool.spec --clean
+python -m PyInstaller blog_tool.spec --clean -y
 if errorlevel 1 (
     echo BUILD FAILED. Check the error above.
     pause

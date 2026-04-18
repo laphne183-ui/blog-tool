@@ -7,8 +7,10 @@ result 시트의 CONCATENATE(schedule!...) 수식을 파싱해서
 """
 
 import glob
+import math
 import os
 import re
+import xml.etree.ElementTree as ET
 
 import openpyxl
 from openpyxl.drawing.image import Image as XLImage
@@ -20,6 +22,176 @@ try:
     PIL_OK = True
 except ImportError:
     PIL_OK = False
+
+
+def _merge_sheet_styles(original_xml, output_xml):
+    """Preserve original worksheet style refs while keeping updated cell values."""
+    orig_root = ET.fromstring(original_xml)
+    out_root = ET.fromstring(output_xml)
+
+    ns_uri = ""
+    if out_root.tag.startswith("{"):
+        ns_uri = out_root.tag.split("}")[0].strip("{")
+
+    def q(name):
+        return f"{{{ns_uri}}}{name}" if ns_uri else name
+
+    def find(parent, name):
+        return parent.find(q(name))
+
+    def findall(parent, name):
+        return parent.findall(q(name))
+
+    orig_cols = find(orig_root, "cols")
+    out_cols = find(out_root, "cols")
+    if orig_cols is not None:
+        if out_cols is not None:
+            out_root.remove(out_cols)
+        sheet_data = find(out_root, "sheetData")
+        insert_at = list(out_root).index(sheet_data) if sheet_data is not None else 0
+        out_root.insert(insert_at, orig_cols)
+
+    orig_sheet_data = find(orig_root, "sheetData")
+    out_sheet_data = find(out_root, "sheetData")
+    if orig_sheet_data is None or out_sheet_data is None:
+        return ET.tostring(out_root, encoding="utf-8", xml_declaration=True)
+
+    orig_rows = {row.attrib.get("r"): row for row in findall(orig_sheet_data, "row")}
+    for out_row in findall(out_sheet_data, "row"):
+        row_ref = out_row.attrib.get("r")
+        orig_row = orig_rows.get(row_ref)
+        if orig_row is None:
+            continue
+
+        for attr in ("s", "customFormat", "ht", "customHeight"):
+            if attr in orig_row.attrib:
+                out_row.attrib[attr] = orig_row.attrib[attr]
+            else:
+                out_row.attrib.pop(attr, None)
+
+        orig_cells = {cell.attrib.get("r"): cell for cell in findall(orig_row, "c")}
+        for out_cell in findall(out_row, "c"):
+            cell_ref = out_cell.attrib.get("r")
+            orig_cell = orig_cells.get(cell_ref)
+            if orig_cell is None:
+                continue
+            if "s" in orig_cell.attrib:
+                out_cell.attrib["s"] = orig_cell.attrib["s"]
+            else:
+                out_cell.attrib.pop("s", None)
+
+    return ET.tostring(out_root, encoding="utf-8", xml_declaration=True)
+
+
+def _restore_template_styles(template_path, output_path):
+    """Restore original workbook styles after openpyxl-safe loading/saving."""
+    import zipfile
+    import tempfile
+
+    fd, tmp_zip = tempfile.mkstemp(suffix=".xlsx")
+    os.close(fd)
+
+    try:
+        with zipfile.ZipFile(template_path, "r") as zorig, \
+             zipfile.ZipFile(output_path, "r") as zout, \
+             zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as znew:
+
+            original_names = set(zorig.namelist())
+
+            for item in zout.infolist():
+                data = zout.read(item.filename)
+
+                if item.filename == "xl/styles.xml" and item.filename in original_names:
+                    data = zorig.read(item.filename)
+                elif item.filename.startswith("xl/worksheets/sheet") and item.filename.endswith(".xml") and item.filename in original_names:
+                    data = _merge_sheet_styles(
+                        zorig.read(item.filename),
+                        data,
+                    )
+
+                znew.writestr(item, data)
+
+        os.replace(tmp_zip, output_path)
+    finally:
+        if os.path.exists(tmp_zip):
+            try:
+                os.remove(tmp_zip)
+            except OSError:
+                pass
+
+
+def _load_workbook_with_fallback(path, **kwargs):
+    """Load normally first, then fall back to a compatibility repair path."""
+    try:
+        return openpyxl.load_workbook(path, **kwargs), False
+    except (TypeError, IndexError):
+        pass
+
+    import zipfile
+    import re as _re
+    from io import BytesIO
+    from openpyxl.styles.stylesheet import Stylesheet
+    from openpyxl.xml.functions import fromstring
+    import xml.etree.ElementTree as ET
+
+    with zipfile.ZipFile(path, "r") as zin:
+        fixed_styles = None
+        max_valid_style = None
+
+        try:
+            styles_xml = zin.read("xl/styles.xml")
+            root = ET.fromstring(styles_xml)
+            ns = root.tag.split("}")[0].strip("{") if root.tag.startswith("{") else ""
+            cellstyles = root.find(f"{{{ns}}}cellStyles") if ns else root.find("cellStyles")
+            if cellstyles is not None:
+                for child in list(cellstyles):
+                    if "name" not in child.attrib:
+                        child.set("name", "Normal")
+            fixed_styles = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+            style_count = len(Stylesheet.from_tree(fromstring(fixed_styles)).cell_styles)
+            max_valid_style = max(0, style_count - 1)
+        except Exception:
+            fixed_styles = None
+            max_valid_style = None
+
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == "xl/styles.xml":
+                    if fixed_styles is not None:
+                        data = fixed_styles
+                    else:
+                        text = data.decode("utf-8", errors="ignore")
+                        text = _re.sub(
+                            r'<(?P<prefix>[A-Za-z0-9_]+:)?cellStyle\b(?=[^>]*?/>)((?!\bname=)[^>])*?/>',
+                            lambda m: m.group(0)[:-2] + ' name="Normal"/>',
+                            text,
+                        )
+                        data = text.encode("utf-8")
+                elif max_valid_style is not None and item.filename.startswith("xl/worksheets/sheet") and item.filename.endswith(".xml"):
+                    text = data.decode("utf-8", errors="ignore")
+                    text = _re.sub(
+                        r'\bs="(\d+)"',
+                        lambda m: f's="{min(int(m.group(1)), max_valid_style)}"',
+                        text,
+                    )
+                    text = _re.sub(
+                        r'\bstyle="(\d+)"',
+                        lambda m: f'style="{min(int(m.group(1)), max_valid_style)}"',
+                        text,
+                    )
+                    data = text.encode("utf-8")
+                zout.writestr(item, data)
+
+    buffer.seek(0)
+    return openpyxl.load_workbook(buffer, **kwargs), True
+
+
+def _load_workbook_safe(path, **kwargs):
+    """Backward-compatible wrapper returning only the workbook."""
+    wb, _used_fallback = _load_workbook_with_fallback(path, **kwargs)
+    return wb
 
 
 # 이미지 사방 여백 (픽셀). 값을 늘리면 여백이 넓어집니다.
@@ -247,15 +419,99 @@ def read_schedule_keywords(wb):
     analyze_template_layout() 로 얻은 키워드 목록을 반환.
     반환: [(keyword_str, slot_index), ...]
     """
+    seq_col, kw_col, header_row = _find_schedule_seq_kw_cols(wb)
+    if seq_col is not None:
+        ws = wb["schedule"]
+        rows = []
+        for row_idx in range(header_row + 1, ws.max_row + 1):
+            seq_val = ws.cell(row=row_idx, column=seq_col).value
+            try:
+                seq_num = int(seq_val)
+            except (TypeError, ValueError):
+                continue
+
+            kw = str(ws.cell(row=row_idx, column=kw_col).value or "").strip()
+            if kw:
+                rows.append((kw, seq_num))
+
+        if rows:
+            return sorted(rows, key=lambda x: x[1])
+
     slots = analyze_template_layout(wb)
     return [(s["keyword"], i) for i, s in enumerate(slots)]
+
+
+def _find_schedule_seq_kw_cols(wb):
+    """schedule 시트에서 '순' / '키워드' 헤더 열 번호와 헤더 행 번호를 반환.
+
+    팀원마다 시트 레이아웃이 달라도 셀 값으로 탐색하므로 행 위치에 의존하지 않음.
+    반환: (seq_col, kw_col, header_row) or (None, None, None)
+    """
+    if "schedule" not in wb.sheetnames:
+        return None, None, None
+    ws = wb["schedule"]
+    for row in ws.iter_rows():
+        seq_col = kw_col = header_row = None
+        for cell in row:
+            if not hasattr(cell, "column") or not hasattr(cell, "row"):
+                continue
+            val = str(cell.value or "").strip()
+            if val == "순":
+                seq_col = cell.column
+                header_row = cell.row
+            elif val == "키워드":
+                kw_col = cell.column
+        if seq_col and kw_col and header_row:
+            return seq_col, kw_col, header_row
+    return None, None, None
+
+
+def read_schedule_by_week(wb, week):
+    """schedule 시트에서 해당 주차(week)의 키워드 목록을 반환.
+
+    week=1 → 순 1~5, week=2 → 순 6~10, ...
+    반환: [(keyword, seq_num), ...]  순번 오름차순
+    """
+    seq_col, kw_col, header_row = _find_schedule_seq_kw_cols(wb)
+    if seq_col is None:
+        return []
+    ws = wb["schedule"]
+    week_start = (week - 1) * 5 + 1
+    week_end = week * 5
+    results = []
+    for row_idx in range(header_row + 1, ws.max_row + 1):
+        seq_val = ws.cell(row=row_idx, column=seq_col).value
+        try:
+            seq_num = int(seq_val)
+        except (TypeError, ValueError):
+            continue
+        if week_start <= seq_num <= week_end:
+            kw = str(ws.cell(row=row_idx, column=kw_col).value or "").strip()
+            if kw:
+                results.append((kw, seq_num))
+    return sorted(results, key=lambda x: x[1])
+
+
+def get_schedule_max_week(wb):
+    """schedule 시트의 최대 순번을 기준으로 전체 주차 수를 반환."""
+    seq_col, _kw_col, header_row = _find_schedule_seq_kw_cols(wb)
+    if seq_col is None:
+        return 4
+    ws = wb["schedule"]
+    max_seq = 0
+    for row_idx in range(header_row + 1, ws.max_row + 1):
+        val = ws.cell(row=row_idx, column=seq_col).value
+        try:
+            max_seq = max(max_seq, int(val))
+        except (TypeError, ValueError):
+            continue
+    return max(1, math.ceil(max_seq / 5))
 
 
 def find_capture_file(keyword, captures_dir):
     """
     captures_dir 하위 폴더에서 [safe_keyword]_*.png 파일 탐색.
-    같은 키워드 캡처가 여러 장이면 가장 최근에 생성된 파일을 반환.
-    같은 시각이면 숫자 suffix가 있는 파일을 우선한다.
+    숫자 순위가 있는 파일 우선 반환. 없으면 None.
     """
     safe_kw = _safe_filename(keyword)
     matches = glob.glob(os.path.join(captures_dir, "**", f"{safe_kw}_*.png"), recursive=True)
@@ -264,9 +520,7 @@ def find_capture_file(keyword, captures_dir):
 
     def _priority(path):
         suffix = os.path.splitext(os.path.basename(path))[0][len(safe_kw) + 1:]
-        is_numeric = suffix.isdigit()
-        mtime = os.path.getmtime(path)
-        return (-mtime, 0 if is_numeric else 1, path)
+        return (0 if suffix.isdigit() else 1, path)
 
     return sorted(matches, key=_priority)[0]
 
@@ -298,7 +552,7 @@ def insert_captures_to_report(template_path, captures_dir, output_path, ranks=No
 
     반환값: list of (keyword, status_str)
     """
-    wb = openpyxl.load_workbook(template_path)
+    wb, used_fallback = _load_workbook_with_fallback(template_path)
 
     for sheet in ("schedule", "result"):
         if sheet not in wb.sheetnames:
@@ -396,6 +650,8 @@ def insert_captures_to_report(template_path, captures_dir, output_path, ranks=No
     try:
         wb.save(tmp_out)
         os.replace(tmp_out, output_path)
+        if used_fallback:
+            _restore_template_styles(template_path, output_path)
     except Exception:
         try:
             os.remove(tmp_out)
