@@ -28,6 +28,7 @@ if not exist "%SRC%" (
 )
 
 xcopy /E /I /Y "%SRC%" "%DST%"
+copy /Y "selectors.json" "dist\blogranker\selectors.json" > nul
 
 echo.
 echo ========================================

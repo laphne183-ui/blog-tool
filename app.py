@@ -36,10 +36,12 @@ RESOURCE_DIR = get_resource_dir()
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 INPUT_PATH = os.path.join(APP_DIR, "input.csv")
 OUTPUT_DIR = os.path.join(APP_DIR, "output")
+SELECTORS_PATH = os.path.join(APP_DIR, "selectors.json")
 ICON_PATH = os.path.join(RESOURCE_DIR, "app_icon.ico")
 ICON_PATH_ALT = os.path.join(APP_DIR, "icon.ico")
 CONFIG_TEMPLATE_PATH = os.path.join(RESOURCE_DIR, "config.json")
 INPUT_TEMPLATE_PATH = os.path.join(RESOURCE_DIR, "input.csv")
+SELECTORS_TEMPLATE_PATH = os.path.join(RESOURCE_DIR, "selectors.json")
 COLUMNS = ("업체명", "키워드", "식별값")
 VALID_BROWSER_MODES = {"auto", "chrome", "chromium"}
 FONT_FAMILY = "맑은 고딕"
@@ -72,6 +74,7 @@ def ensure_runtime_file(target_path, template_path):
 def ensure_runtime_files():
     ensure_runtime_file(CONFIG_PATH, CONFIG_TEMPLATE_PATH)
     ensure_runtime_file(INPUT_PATH, INPUT_TEMPLATE_PATH)
+    ensure_runtime_file(SELECTORS_PATH, SELECTORS_TEMPLATE_PATH)
 
 
 def load_json(path):

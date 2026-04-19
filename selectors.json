@@ -1,0 +1,24 @@
+{
+  "blog_card_selector": "[data-template-id=\"ugcItem\"]",
+  "channel_selector": ".sds-comps-profile-info-title-text",
+  "title_selector_candidates": [
+    "a.title_link",
+    ".title_area a[href]",
+    "a.api_txt_lines.total_tit",
+    "a[data-testid='title']",
+    ".sds-comps-text-type-headline1 a[href]",
+    ".title_group a[href]"
+  ],
+  "ignored_link_labels": [
+    "keep\uc5d0\uc800\uc7a5",
+    "keep",
+    "\uacf5\uc720",
+    "\ub354\ubcf4\uae30",
+    "\uc5f4\uae30",
+    "\ub2eb\uae30",
+    "\uc774\uc804",
+    "\ub2e4\uc74c",
+    "\ub313\uae00",
+    "\uc88b\uc544\uc694"
+  ]
+}

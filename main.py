@@ -43,6 +43,10 @@ CONFIG_FILES = [
     os.path.join(APP_BASE_DIR, "config.json"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"),
 ]
+SELECTOR_FILES = [
+    os.path.join(APP_BASE_DIR, "selectors.json"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "selectors.json"),
+]
 
 MAX_SCROLL = 80
 SEARCHBAR_CROP = 68
@@ -115,6 +119,62 @@ EXCLUDE_EXACT = {
 
 class SearchCancelled(Exception):
     pass
+
+
+def _load_selector_config():
+    config = {
+        "blog_card_selector": BLOG_CARD_SELECTOR,
+        "channel_selector": CHANNEL_SELECTOR,
+        "title_selector_candidates": list(TITLE_SELECTOR_CANDIDATES),
+        "ignored_link_labels": list(IGNORED_LINK_LABELS),
+    }
+
+    for path in SELECTOR_FILES:
+        if not os.path.exists(path):
+            continue
+
+        loaded = None
+        for encoding in ("utf-8-sig", "utf-8", "cp949"):
+            try:
+                with open(path, "r", encoding=encoding) as file:
+                    loaded = json.load(file)
+                break
+            except UnicodeDecodeError:
+                continue
+            except Exception:
+                loaded = None
+                break
+
+        if not isinstance(loaded, dict):
+            continue
+
+        blog_card_selector = str(loaded.get("blog_card_selector", "")).strip()
+        channel_selector = str(loaded.get("channel_selector", "")).strip()
+        title_selector_candidates = loaded.get("title_selector_candidates")
+        ignored_link_labels = loaded.get("ignored_link_labels")
+
+        if blog_card_selector:
+            config["blog_card_selector"] = blog_card_selector
+        if channel_selector:
+            config["channel_selector"] = channel_selector
+        if isinstance(title_selector_candidates, list):
+            cleaned = [str(item).strip() for item in title_selector_candidates if str(item).strip()]
+            if cleaned:
+                config["title_selector_candidates"] = cleaned
+        if isinstance(ignored_link_labels, list):
+            cleaned = [str(item).strip() for item in ignored_link_labels if str(item).strip()]
+            if cleaned:
+                config["ignored_link_labels"] = cleaned
+        break
+
+    return config
+
+
+_SELECTOR_CONFIG = _load_selector_config()
+BLOG_CARD_SELECTOR = _SELECTOR_CONFIG["blog_card_selector"]
+CHANNEL_SELECTOR = _SELECTOR_CONFIG["channel_selector"]
+TITLE_SELECTOR_CANDIDATES = _SELECTOR_CONFIG["title_selector_candidates"]
+IGNORED_LINK_LABELS = _SELECTOR_CONFIG["ignored_link_labels"]
 
 
 def normalize(text):

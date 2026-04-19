@@ -6,6 +6,7 @@ from PyInstaller.utils.hooks import collect_data_files
 datas  = collect_data_files("customtkinter")
 datas += collect_data_files("openpyxl")
 datas += [("app_icon.ico", ".")]
+datas += [("selectors.json", ".")]
 
 a = Analysis(
     ["app.py"],
