@@ -251,6 +251,24 @@ def get_browser_mode():
     return "auto"
 
 
+API_MAX_RESULTS_DEFAULT = 300
+
+
+def get_api_max_results():
+    raw = os.getenv("BLOG_API_MAX_RESULTS", "").strip()
+    if not raw:
+        config = load_json_config()
+        raw = str(config.get("api_max_results", "")).strip()
+
+    try:
+        value = int(raw)
+    except ValueError:
+        return API_MAX_RESULTS_DEFAULT
+
+    # OpenAPI start 파라미터 상한이 1000이므로 그 이상은 조회 불가
+    return min(max(value, 100), 1000)
+
+
 def get_browser_attempt_modes(browser_mode):
     if browser_mode == "chrome":
         return ["chrome"]
@@ -334,6 +352,7 @@ def build_card_key(card):
 def build_match_context(identifier, api_result, query=""):
     bloggerlink = api_result.get("bloggerlink", "")
     post_link = api_result.get("post_link", "")
+    target_post_id = api_result.get("target_post_id") or extract_post_id(identifier)
     return {
         "identifier": identifier,
         "identifier_norm": normalize(identifier),
@@ -347,8 +366,41 @@ def build_match_context(identifier, api_result, query=""):
         "blogger_id_norm": extract_blog_id(bloggerlink),
         "post_link": post_link,
         "post_link_id": extract_post_id(post_link),
+        "target_post_id": target_post_id,
         "query_norm": normalize(query),
     }
+
+
+def describe_api_scope(api_result):
+    if api_result.get("api_rank") is None and api_result.get("target_post_id"):
+        return "글단위 미확인"
+    scope = api_result.get("match_scope", "")
+    if scope == "post":
+        return "글단위"
+    if scope == "blog":
+        return "블로그단위"
+    return ""
+
+
+def build_api_note(api_result):
+    api_rank = api_result.get("api_rank")
+    scope_label = describe_api_scope(api_result)
+    if api_rank is None or not scope_label:
+        return ""
+    if scope_label == "블로그단위":
+        return "API=블로그단위(동일 글 확인 아님)"
+    return f"API={scope_label}"
+
+
+def build_api_match_label(api_result):
+    api_rank = api_result.get("api_rank")
+    if api_rank is None:
+        return ""
+    scope_label = describe_api_scope(api_result) or "범위미확인"
+    matched_text = api_result.get("matched_text") or api_result.get("title") or ""
+    if matched_text:
+        return f"API {scope_label}: {matched_text}"
+    return f"API {scope_label}"
 
 
 def get_visible_blog_cards(page):
@@ -481,6 +533,7 @@ def match_blog_card(card, match_context):
     api_matched_norm = match_context["api_matched_norm"]
     identifier_norm = match_context["identifier_norm"]
     post_link_id = match_context.get("post_link_id", "")
+    target_post_id = match_context.get("target_post_id", "")
     query_norm = match_context.get("query_norm", "")
 
     # 카드 자체의 primary_link (포스트 URL) 기준으로 블로그 계정 추출
@@ -488,7 +541,15 @@ def match_blog_card(card, match_context):
     # 링크를 달아도 해당 포스트의 계정은 다른 블로그이므로 오매칭 방지
     primary_link_norm = normalize_url(card.get("primary_link", ""))
     primary_blog_id = extract_blog_id(primary_link_norm)
-    primary_post_id = extract_post_id(primary_link_norm)
+    # post_id는 normalize_url이 ?logNo= 쿼리를 제거하기 전의 원본 링크에서 추출
+    primary_post_id = extract_post_id(card.get("primary_link", ""))
+    card_post_ids = {extract_post_id(href) for href in card.get("hrefs", []) if href}
+    card_post_ids.discard("")
+
+    if target_post_id:
+        if target_post_id == primary_post_id or target_post_id in card_post_ids:
+            return "target_post_id"
+        return None
 
     # ① URL/ID 기반 (신뢰도 최상 - 먼저 확인)
     # Fix #2: API가 특정 포스트 URL을 반환한 경우 포스트 ID까지 일치해야 캡처
@@ -795,14 +856,18 @@ def describe_card(card):
 
 def find_rank_for_keyword(browser, api, keyword, identifier, capture_dir=None, capture_basename=None):
     wait_if_paused()
-    api_result = api.find_target_rank(query=keyword, identifier=identifier, max_results=100)
+    api_result = api.find_target_rank(query=keyword, identifier=identifier, max_results=get_api_max_results())
     wait_if_paused()
     api_rank = api_result["api_rank"]
+    api_scope = describe_api_scope(api_result)
+    api_note = build_api_note(api_result)
     match_context = build_match_context(identifier, api_result, query=keyword)
     capture_dir = capture_dir or CAPTURE_DIR
     capture_basename = capture_basename or safe_filename(keyword, fallback="키워드없음")
 
     print(f"[API 정보] {keyword} -> {api_rank if api_rank else '미확인'}")
+    if api_scope:
+        print(f"  API 매칭범위: {api_scope}")
     if api_result.get("title"):
         print(f"  API 제목: {api_result['title']}")
     if api_result.get("matched_text"):
@@ -862,12 +927,14 @@ def find_rank_for_keyword(browser, api, keyword, identifier, capture_dir=None, c
             return {
                 "api_rank": api_rank,
                 "live_rank": running_rank,
-                "note": f"성공({matched_reason})",
+                "note": f"성공({matched_reason})" + (f" | {api_note}" if api_note else ""),
                 "capture_path": capture_path,
                 "matched_name": matched_name,
                 "matched_text": matched_text,
                 "api_title": api_result["title"],
                 "api_field": api_result["matched_field"],
+                "api_scope": api_scope,
+                "api_note": api_note,
             }
 
         empty_count = empty_count + 1 if new_count == 0 else 0
@@ -883,12 +950,14 @@ def find_rank_for_keyword(browser, api, keyword, identifier, capture_dir=None, c
     return {
         "api_rank": api_rank,
         "live_rank": None,
-        "note": "화면 미발견",
+        "note": "화면 미발견" + (f" | {api_note}" if api_note else ""),
         "capture_path": "",
-        "matched_name": "",
+        "matched_name": build_api_match_label(api_result),
         "matched_text": "",
         "api_title": api_result["title"],
         "api_field": api_result["matched_field"],
+        "api_scope": api_scope,
+        "api_note": api_note,
     }
 
 
@@ -1017,6 +1086,7 @@ def main():
                     "화면순위": rank_text,
                     "매칭텍스트": result["matched_text"],
                     "API매칭필드": result["api_field"],
+                    "API매칭범위": result.get("api_scope", ""),
                     "API제목": result["api_title"],
                     "캡처파일": final_capture,
                     "사용브라우저": result.get("used_browser", ""),
@@ -1039,6 +1109,7 @@ def main():
                     "화면순위": "오류",
                     "매칭텍스트": "",
                     "API매칭필드": "",
+                    "API매칭범위": "",
                     "API제목": "",
                     "캡처파일": "",
                     "사용브라우저": "",

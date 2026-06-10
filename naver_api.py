@@ -11,6 +11,29 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", "", str(text)).lower()
 
 
+def normalize_url(text: str) -> str:
+    url = str(text or "").strip()
+    url = re.sub(r"[?#].*$", "", url)
+    return url.rstrip("/").lower()
+
+
+def extract_blog_id(text: str) -> str:
+    normalized_url = normalize_url(text)
+    match = re.search(r"(?:https?://)?(?:m\.)?blog\.naver\.com/([^/?#]+)", normalized_url)
+    return normalize(match.group(1)) if match else ""
+
+
+def extract_post_id(url: str) -> str:
+    url = str(url or "").lower()
+    match = re.search(r"blog\.naver\.com/[^/?#]+/(\d{5,})", url)
+    if match:
+        return match.group(1)
+    match = re.search(r"logno=(\d{5,})", url)
+    if match:
+        return match.group(1)
+    return ""
+
+
 def strip_html(text: str) -> str:
     text = html.unescape(text or "")
     return re.sub(r"<.*?>", "", text)
@@ -49,6 +72,8 @@ class NaverBlogAPI:
         max_results: int = 100,
     ):
         identifier_norm = normalize(identifier)
+        identifier_blog_id = extract_blog_id(identifier)
+        target_post_id = extract_post_id(identifier)
         gathered = []
         start = 1
 
@@ -68,36 +93,53 @@ class NaverBlogAPI:
             if len(items) < display:
                 break
 
+        def build_result(idx, item, matched_field, matched_text, match_scope):
+            title = strip_html(item.get("title", ""))
+            bloggerlink = item.get("bloggerlink", "")
+            post_link = item.get("link", "")
+            return {
+                "api_rank": idx,
+                "matched_field": matched_field,
+                "matched_text": matched_text,
+                "match_scope": match_scope,
+                "title": title,
+                "bloggerlink": bloggerlink,
+                "post_link": post_link,
+                "post_id": extract_post_id(post_link),
+                "target_post_id": target_post_id,
+                "items": gathered,
+            }
+
         for idx, item in enumerate(gathered, start=1):
             bloggername = strip_html(item.get("bloggername", ""))
             bloggerlink = item.get("bloggerlink", "")
-            title = strip_html(item.get("title", ""))
+            post_link = item.get("link", "")
+            post_id = extract_post_id(post_link)
+            item_blog_id = extract_blog_id(post_link) or extract_blog_id(bloggerlink)
+
+            if target_post_id:
+                if post_id == target_post_id:
+                    return build_result(idx, item, "post_link", post_link, "post")
+                continue
+
+            if identifier_blog_id and item_blog_id == identifier_blog_id:
+                return build_result(idx, item, "bloggerlink", bloggerlink, "blog")
 
             if identifier_norm in normalize(bloggername):
-                return {
-                    "api_rank": idx,
-                    "matched_field": "bloggername",
-                    "matched_text": bloggername,
-                    "title": title,
-                    "bloggerlink": bloggerlink,
-                    "items": gathered,
-                }
+                return build_result(idx, item, "bloggername", bloggername, "blog")
 
             if identifier_norm in normalize(bloggerlink):
-                return {
-                    "api_rank": idx,
-                    "matched_field": "bloggerlink",
-                    "matched_text": bloggerlink,
-                    "title": title,
-                    "bloggerlink": bloggerlink,
-                    "items": gathered,
-                }
+                return build_result(idx, item, "bloggerlink", bloggerlink, "blog")
 
         return {
             "api_rank": None,
             "matched_field": "",
             "matched_text": "",
+            "match_scope": "post" if target_post_id else "",
             "title": "",
             "bloggerlink": "",
+            "post_link": "",
+            "post_id": "",
+            "target_post_id": target_post_id,
             "items": gathered,
         }
