@@ -121,64 +121,54 @@ def _restore_template_styles(template_path, output_path):
 
 
 def _load_workbook_with_fallback(path, **kwargs):
-    """Load normally first, then fall back to a compatibility repair path."""
+    """Load normally first; on NamedCellStyle.name=None TypeError, patch the
+    descriptor in-place so None is accepted, then reload without touching XML."""
     try:
         return openpyxl.load_workbook(path, **kwargs), False
     except (TypeError, IndexError):
         pass
 
+    # ── 방법 1: NamedCellStyle.name 디스크립터의 allow_none만 켜서 재시도 ──────
+    # XML을 재작성하지 않으므로 네임스페이스·AlternateContent 손상 없음.
+    try:
+        from openpyxl.styles.named_styles import NamedCellStyle as _NCS
+        _desc = _NCS.__dict__.get("name")
+        if _desc is not None and hasattr(_desc, "allow_none"):
+            _orig = _desc.allow_none
+            _desc.allow_none = True
+            try:
+                return openpyxl.load_workbook(path, **kwargs), True
+            except (TypeError, IndexError):
+                pass
+            finally:
+                _desc.allow_none = _orig
+    except Exception:
+        pass
+
+    # ── 방법 2: 바이트 수준 최소 패치 (name 없는 cellStyle 태그에 attribute 삽입) ──
     import zipfile
     import re as _re
     from io import BytesIO
-    from openpyxl.styles.stylesheet import Stylesheet
-    from openpyxl.xml.functions import fromstring
-    import xml.etree.ElementTree as ET
 
     with zipfile.ZipFile(path, "r") as zin:
-        fixed_styles = None
-        max_valid_style = None
-
-        try:
-            styles_xml = zin.read("xl/styles.xml")
-            root = ET.fromstring(styles_xml)
-            ns = root.tag.split("}")[0].strip("{") if root.tag.startswith("{") else ""
-            cellstyles = root.find(f"{{{ns}}}cellStyles") if ns else root.find("cellStyles")
-            if cellstyles is not None:
-                for child in list(cellstyles):
-                    if "name" not in child.attrib:
-                        child.set("name", "Normal")
-            fixed_styles = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-            style_count = len(Stylesheet.from_tree(fromstring(fixed_styles)).cell_styles)
-            max_valid_style = max(0, style_count - 1)
-        except Exception:
-            fixed_styles = None
-            max_valid_style = None
-
         buffer = BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
                 if item.filename == "xl/styles.xml":
-                    if fixed_styles is not None:
-                        data = fixed_styles
-                    else:
-                        text = data.decode("utf-8", errors="ignore")
-                        text = _re.sub(
-                            r'<(?P<prefix>[A-Za-z0-9_]+:)?cellStyle\b(?=[^>]*?/>)((?!\bname=)[^>])*?/>',
-                            lambda m: m.group(0)[:-2] + ' name="Normal"/>',
-                            text,
-                        )
-                        data = text.encode("utf-8")
-                elif max_valid_style is not None and item.filename.startswith("xl/worksheets/sheet") and item.filename.endswith(".xml"):
                     text = data.decode("utf-8", errors="ignore")
+
+                    def _inject_name(m):
+                        s = m.group(0)
+                        if "name=" in s:
+                            return s
+                        # name 속성이 없는 cellStyle에 name="Normal" 삽입
+                        sp = s.index(" ") if " " in s else s.index("/")
+                        return s[:sp] + ' name="Normal"' + s[sp:]
+
                     text = _re.sub(
-                        r'\bs="(\d+)"',
-                        lambda m: f's="{min(int(m.group(1)), max_valid_style)}"',
-                        text,
-                    )
-                    text = _re.sub(
-                        r'\bstyle="(\d+)"',
-                        lambda m: f'style="{min(int(m.group(1)), max_valid_style)}"',
+                        r"<(?:\w+:)?cellStyle\b[^>]*/>",
+                        _inject_name,
                         text,
                     )
                     data = text.encode("utf-8")
