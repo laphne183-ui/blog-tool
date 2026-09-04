@@ -9,7 +9,7 @@ from urllib.parse import quote
 import pandas as pd
 
 from browser import NaverBrowser
-from naver_api import NaverBlogAPI
+from naver_api import NaverBlogAPI, resolve_blog_id
 from report import save_report
 
 
@@ -188,9 +188,20 @@ def normalize_url(text):
 
 
 def extract_blog_id(text):
-    normalized_url = normalize_url(text)
+    raw_text = str(text or "").strip().lower()
+    query_match = re.search(r"[?&]blogid=([^&#]+)", raw_text)
+    if query_match:
+        return normalize(query_match.group(1))
+
+    normalized_url = normalize_url(raw_text)
     match = re.search(r"(?:https?://)?(?:m\.)?blog\.naver\.com/([^/?#]+)", normalized_url)
-    return normalize(match.group(1)) if match else ""
+    if not match:
+        return ""
+
+    blog_id = normalize(match.group(1))
+    if blog_id.lower() in {"postview.naver", "postlist.naver"}:
+        return ""
+    return blog_id
 
 
 def extract_post_id(url):
@@ -251,7 +262,9 @@ def get_browser_mode():
     return "auto"
 
 
-API_MAX_RESULTS_DEFAULT = 300
+# 최근 API 정렬에서 대상 블로그가 수백 위 밖으로 밀리는 사례가 있어
+# OpenAPI가 허용하는 최대 범위까지 기본 확인한다.
+API_MAX_RESULTS_DEFAULT = 1000
 
 
 def get_api_max_results():
@@ -356,6 +369,7 @@ def build_match_context(identifier, api_result, query=""):
     return {
         "identifier": identifier,
         "identifier_norm": normalize(identifier),
+        "identifier_blog_id": resolve_blog_id(identifier),
         "api_title": api_result.get("title", ""),
         "api_title_norm": normalize(api_result.get("title", "")),
         "api_matched_text": api_result.get("matched_text", ""),
@@ -523,8 +537,8 @@ def match_blog_card(card, match_context):
     title_norm = normalize(card.get("title"))
     text_norm = normalize(card.get("text"))
     link_texts_norm = [normalize(text) for text in card.get("link_texts", []) if text]
-    hrefs_norm = [normalize_url(href) for href in card.get("hrefs", []) if href]
-    blog_ids = {extract_blog_id(href) for href in hrefs_norm}
+    raw_hrefs = [href for href in card.get("hrefs", []) if href]
+    blog_ids = {extract_blog_id(href) for href in raw_hrefs}
     blog_ids.discard("")
 
     api_title_norm = match_context["api_title_norm"]
@@ -532,6 +546,7 @@ def match_blog_card(card, match_context):
     blogger_id_norm = match_context["blogger_id_norm"]
     api_matched_norm = match_context["api_matched_norm"]
     identifier_norm = match_context["identifier_norm"]
+    identifier_blog_id = match_context.get("identifier_blog_id", "")
     post_link_id = match_context.get("post_link_id", "")
     target_post_id = match_context.get("target_post_id", "")
     query_norm = match_context.get("query_norm", "")
@@ -540,7 +555,7 @@ def match_blog_card(card, match_context):
     # hrefs 전체가 아닌 primary_link만 사용 → 협찬 포스트가 업체 블로그에
     # 링크를 달아도 해당 포스트의 계정은 다른 블로그이므로 오매칭 방지
     primary_link_norm = normalize_url(card.get("primary_link", ""))
-    primary_blog_id = extract_blog_id(primary_link_norm)
+    primary_blog_id = extract_blog_id(card.get("primary_link", ""))
     # post_id는 normalize_url이 ?logNo= 쿼리를 제거하기 전의 원본 링크에서 추출
     primary_post_id = extract_post_id(card.get("primary_link", ""))
     card_post_ids = {extract_post_id(href) for href in card.get("hrefs", []) if href}
@@ -573,7 +588,15 @@ def match_blog_card(card, match_context):
         else:
             return "blogger_id"
 
-    # ② 채널명 기반
+    # ② 사용자가 입력한 블로그 URL/ID 기반
+    # API가 대상을 찾지 못했더라도 검색 카드 링크의 실제 블로그 ID로 판정한다.
+    if identifier_blog_id and primary_blog_id == identifier_blog_id:
+        return "identifier_blog_id"
+
+    if identifier_blog_id and identifier_blog_id in blog_ids:
+        return "identifier_blog_id"
+
+    # ③ 채널명 기반
     # Fix #1: API가 타겟 블로그를 찾지 못해 bloggerlink가 없을 때,
     # 채널명만으로 매칭하면 부분 포함 키워드("삼성동골프" ↔ "삼성동골프레슨")의
     # 다른 포스트를 잘못 캡처할 수 있음.
@@ -591,7 +614,7 @@ def match_blog_card(card, match_context):
         if not bloggerlink_norm or _keyword_in_card():
             return "identifier_channel"
 
-    # ③ 제목 기반 - 반드시 채널명으로 대상 블로그 신원 확인
+    # ④ 제목 기반 - 반드시 채널명으로 대상 블로그 신원 확인
     # (방문 후기 블로그는 포스트 제목에 업체명이 포함돼도 채널명이 다르므로 제외됨)
     def _channel_confirms():
         if not channel_norm:
@@ -609,7 +632,7 @@ def match_blog_card(card, match_context):
         if _channel_confirms():
             return "api_title_text"
 
-    # ④ 링크 텍스트 기반 (채널명 확인 필요 - 협찬/마케팅 블로그 제외)
+    # ⑤ 링크 텍스트 기반 (채널명 확인 필요 - 협찬/마케팅 블로그 제외)
     if api_matched_norm and any(api_matched_norm in text for text in link_texts_norm):
         if _channel_confirms():
             return "matched_link_text"
@@ -617,10 +640,6 @@ def match_blog_card(card, match_context):
     if identifier_norm and any(identifier_norm in text for text in link_texts_norm):
         if _channel_confirms():
             return "identifier_link_text"
-
-    # ⑤ 블로그 ID 기반 (URL에서 추출 - 채널명 불필요)
-    if identifier_norm and identifier_norm in blog_ids:
-        return "identifier_blog_id"
 
     return None
 

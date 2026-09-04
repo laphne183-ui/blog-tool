@@ -179,10 +179,15 @@ class AddRowDialog(ctk.CTkToplevel):
         )
         self.keyword_entry = ctk.CTkEntry(self, width=320, placeholder_text="예: 샘플 키워드", font=("맑은 고딕", 13))
         self.keyword_entry.grid(row=1, column=1, padx=(0, 28), pady=12, sticky="ew")
-        ctk.CTkLabel(self, text="식별값", font=("맑은 고딕", 14)).grid(
+        ctk.CTkLabel(self, text="식별값 (블로그 ID/URL)", font=("맑은 고딕", 14)).grid(
             row=2, column=0, padx=(28, 12), pady=12, sticky="e"
         )
-        self.identifier_entry = ctk.CTkEntry(self, width=320, placeholder_text="비우면 업체명으로 자동 설정", font=("맑은 고딕", 13))
+        self.identifier_entry = ctk.CTkEntry(
+            self,
+            width=320,
+            placeholder_text="예: soso2226 (비우면 업체명)",
+            font=("맑은 고딕", 13),
+        )
         self.identifier_entry.grid(row=2, column=1, padx=(0, 28), pady=12, sticky="ew")
 
         button_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -954,8 +959,12 @@ class BlogRankApp(ctk.CTk):
         self.tree.tag_configure("odd", background="#FFFFFF")
         self.tree.tag_configure("even", background="#FAFBFC")
 
-        for column, width in (("업체명", 250), ("키워드", 340), ("식별값", 250)):
-            self.tree.heading(column, text=column, anchor="center")
+        for column, label, width in (
+            ("업체명", "업체명", 250),
+            ("키워드", "키워드", 340),
+            ("식별값", "식별값 (블로그 ID/URL)", 250),
+        ):
+            self.tree.heading(column, text=label, anchor="center")
             self.tree.column(column, anchor="center", width=width, stretch=True)
 
         self.tree.bind("<Double-1>", self._handle_double_click)
@@ -1556,6 +1565,31 @@ class BlogRankApp(ctk.CTk):
             self.status_var.set("실행 중...")
         self._update_summary_panel()
 
+    def _suggest_blog_identifier(self, company):
+        company_norm = str(company or "").strip().lower()
+        for row in self.rows:
+            if str(row.get("업체명", "")).strip().lower() != company_norm:
+                continue
+            identifier = str(row.get("식별값", "")).strip()
+            if identifier and identifier.lower() != company_norm:
+                return identifier
+        return ""
+
+    def _ask_blog_identifier(self, company):
+        from tkinter import simpledialog
+
+        identifier = simpledialog.askstring(
+            "블로그 식별값 입력",
+            "대상 블로그 ID 또는 주소를 입력해주세요.\n"
+            "예: soso2226 또는 https://blog.naver.com/soso2226\n\n"
+            "비워두면 기존처럼 업체명으로 판정합니다.",
+            initialvalue=self._suggest_blog_identifier(company),
+            parent=self,
+        )
+        if identifier is None:
+            return None
+        return identifier.strip() or company
+
     def _load_keywords_from_template(self):
         if not self.template_path or not os.path.exists(self.template_path):
             messagebox.showwarning("템플릿 없음", "보고서 템플릿 파일을 먼저 선택해주세요.", parent=self)
@@ -1598,14 +1632,19 @@ class BlogRankApp(ctk.CTk):
             ):
                 return
 
-        new_rows = [
-            {"업체명": company, "키워드": kw, "식별값": company}
-            for kw, _ in keywords
-        ]
+        identifier = self._ask_blog_identifier(company)
+        if identifier is None:
+            return
+
+        new_rows = [{"업체명": company, "키워드": kw, "식별값": identifier} for kw, _ in keywords]
         self.rows = new_rows
         self._load_tree_rows()
         self._persist_rows()
-        self._append_log(f"템플릿에서 키워드 {len(new_rows)}개를 불러왔습니다. (업체: {company})\n", "yellow")
+        self._append_log(
+            f"템플릿에서 키워드 {len(new_rows)}개를 불러왔습니다. "
+            f"(업체: {company} / 식별값: {identifier})\n",
+            "yellow",
+        )
 
     def _start_weekly_report(self):
         if not self.template_path or not os.path.exists(self.template_path):
@@ -1640,20 +1679,24 @@ class BlogRankApp(ctk.CTk):
             messagebox.showwarning("키워드 없음", f"{self._format_week_range(week)} 구간 키워드가 없습니다.\n스케줄 시트에 '순' / '키워드' 컬럼이 있는지 확인해주세요.", parent=self)
             return
 
-        self.weekly_company = company
-        self.weekly_week = week
-        self.weekly_pending = True
-
-        new_rows = [{"업체명": company, "키워드": kw, "식별값": company} for kw, _ in week_keywords]
         if self.rows:
             if not messagebox.askyesno(
                 "기존 목록 대체",
                 f"현재 검색 목록 {len(self.rows)}개를 삭제하고\n"
-                f"{self._format_week_range(week)} 구간 키워드 {len(new_rows)}개로 교체 후 검색을 시작할까요?",
+                f"{self._format_week_range(week)} 구간 키워드 {len(week_keywords)}개로 교체 후 검색을 시작할까요?",
                 parent=self,
             ):
-                self.weekly_pending = False
                 return
+
+        identifier = self._ask_blog_identifier(company)
+        if identifier is None:
+            return
+
+        self.weekly_company = company
+        self.weekly_week = week
+        self.weekly_pending = True
+
+        new_rows = [{"업체명": company, "키워드": kw, "식별값": identifier} for kw, _ in week_keywords]
 
         self.rows = new_rows
         self._load_tree_rows()

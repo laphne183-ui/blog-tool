@@ -18,9 +18,32 @@ def normalize_url(text: str) -> str:
 
 
 def extract_blog_id(text: str) -> str:
-    normalized_url = normalize_url(text)
+    raw_text = str(text or "").strip().lower()
+    query_match = re.search(r"[?&]blogid=([^&#]+)", raw_text)
+    if query_match:
+        return normalize(query_match.group(1))
+
+    normalized_url = normalize_url(raw_text)
     match = re.search(r"(?:https?://)?(?:m\.)?blog\.naver\.com/([^/?#]+)", normalized_url)
-    return normalize(match.group(1)) if match else ""
+    if not match:
+        return ""
+
+    blog_id = normalize(match.group(1))
+    if blog_id.lower() in {"postview.naver", "postlist.naver"}:
+        return ""
+    return blog_id
+
+
+def resolve_blog_id(identifier: str) -> str:
+    """식별값이 네이버 블로그 URL 또는 원시 블로그 ID이면 ID를 반환한다."""
+    url_blog_id = extract_blog_id(identifier)
+    if url_blog_id:
+        return url_blog_id
+
+    candidate = normalize(identifier)
+    if re.fullmatch(r"[a-z0-9._-]+", candidate):
+        return candidate
+    return ""
 
 
 def extract_post_id(url: str) -> str:
@@ -72,26 +95,10 @@ class NaverBlogAPI:
         max_results: int = 100,
     ):
         identifier_norm = normalize(identifier)
-        identifier_blog_id = extract_blog_id(identifier)
+        identifier_blog_id = resolve_blog_id(identifier)
         target_post_id = extract_post_id(identifier)
         gathered = []
         start = 1
-
-        while len(gathered) < max_results and start <= 1000:
-            remain = max_results - len(gathered)
-            display = min(100, remain)
-
-            data = self.search(query=query, start=start, display=display, sort="sim")
-            items = data.get("items", [])
-
-            if not items:
-                break
-
-            gathered.extend(items)
-            start += display
-
-            if len(items) < display:
-                break
 
         def build_result(idx, item, matched_field, matched_text, match_scope):
             title = strip_html(item.get("title", ""))
@@ -110,26 +117,43 @@ class NaverBlogAPI:
                 "items": gathered,
             }
 
-        for idx, item in enumerate(gathered, start=1):
-            bloggername = strip_html(item.get("bloggername", ""))
-            bloggerlink = item.get("bloggerlink", "")
-            post_link = item.get("link", "")
-            post_id = extract_post_id(post_link)
-            item_blog_id = extract_blog_id(post_link) or extract_blog_id(bloggerlink)
+        while len(gathered) < max_results and start <= 1000:
+            remain = max_results - len(gathered)
+            display = min(100, remain)
 
-            if target_post_id:
-                if post_id == target_post_id:
-                    return build_result(idx, item, "post_link", post_link, "post")
-                continue
+            data = self.search(query=query, start=start, display=display, sort="sim")
+            items = data.get("items", [])
 
-            if identifier_blog_id and item_blog_id == identifier_blog_id:
-                return build_result(idx, item, "bloggerlink", bloggerlink, "blog")
+            if not items:
+                break
 
-            if identifier_norm in normalize(bloggername):
-                return build_result(idx, item, "bloggername", bloggername, "blog")
+            for item in items:
+                gathered.append(item)
+                idx = len(gathered)
+                bloggername = strip_html(item.get("bloggername", ""))
+                bloggerlink = item.get("bloggerlink", "")
+                post_link = item.get("link", "")
+                post_id = extract_post_id(post_link)
+                item_blog_id = extract_blog_id(post_link) or extract_blog_id(bloggerlink)
 
-            if identifier_norm in normalize(bloggerlink):
-                return build_result(idx, item, "bloggerlink", bloggerlink, "blog")
+                if target_post_id:
+                    if post_id == target_post_id:
+                        return build_result(idx, item, "post_link", post_link, "post")
+                    continue
+
+                if identifier_blog_id and item_blog_id == identifier_blog_id:
+                    return build_result(idx, item, "bloggerlink", bloggerlink, "blog")
+
+                if not identifier_blog_id and identifier_norm and identifier_norm in normalize(bloggername):
+                    return build_result(idx, item, "bloggername", bloggername, "blog")
+
+                if not identifier_blog_id and identifier_norm and identifier_norm in normalize(bloggerlink):
+                    return build_result(idx, item, "bloggerlink", bloggerlink, "blog")
+
+            start += display
+
+            if len(items) < display:
+                break
 
         return {
             "api_rank": None,
