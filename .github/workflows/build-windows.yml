@@ -1,0 +1,40 @@
+name: Build Windows exe
+
+on:
+  workflow_dispatch:        # Actions 탭에서 수동 실행
+  push:
+    branches: [main]        # main에 커밋될 때마다 자동 빌드
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install customtkinter playwright requests pandas openpyxl pillow pyinstaller
+
+      - name: Build exe
+        run: python -m PyInstaller --noconfirm --clean blog_tool.spec
+
+      - name: Bundle Chromium + files next to exe
+        shell: pwsh
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\dist\blogranker\browsers
+        run: |
+          python -m playwright install chromium
+          Copy-Item selectors.json dist\blogranker\
+          Copy-Item README.md dist\blogranker\
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blogranker-windows
+          path: dist/blogranker/
+          retention-days: 30
